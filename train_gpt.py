@@ -346,7 +346,7 @@ def to_grid(gps):
     return x * y_len + y
 
 
-VOCUB_SIZE = to_grid([116.5574, 40.1022]) + 100
+VOCUB_SIZE = to_grid([116.5574, 40.1022]) + 96 # VOCUB_SIZE = 30720, 30720 / 1024 = 30
 SOT = to_grid([116.5574, 40.1022]) + 1
 
 
@@ -844,6 +844,7 @@ if __name__ == "__main__":
                 model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
             # forward pass
             with ctx:
+                start_day = random.randint(0, 6)
                 _, loss = model(x, y, start_day=start_day, return_logits=False)
                 # we have to scale the loss to account for gradient accumulation,
                 # because the gradients just add on each successive backward().
