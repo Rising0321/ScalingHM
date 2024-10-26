@@ -136,10 +136,6 @@ class GPTConfig:
     n_embd: int = 768
 
 
-pattern = torch.tensor([0, 1, 2, 3, 4, 5, 6]).repeat_interleave(96)
-pattern = pattern.repeat(2)
-
-
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -161,6 +157,8 @@ class GPT(nn.Module):
         self.init_rng = torch.Generator()
         self.init_rng.manual_seed(42)
         self.apply(self._init_weights)
+        self.pattern = torch.tensor([0, 1, 2, 3, 4, 5, 6]).repeat_interleave(96)
+        self.pattern = self.pattern.repeat(2).cuda()
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -182,7 +180,7 @@ class GPT(nn.Module):
         idx = torch.concat([idx[:, 0:1], idx_], dim=1)
         targets = targets[:, start_day * 96: (start_day + 8) * 96]
         # print(idx.shape, targets.shape)
-        ddx = pattern[start_day * 96:(start_day + 8) * 96].cuda()
+        ddx = self.pattern[start_day * 96:(start_day + 8) * 96]
 
         device = idx.device
         b, t = idx.size()
@@ -346,7 +344,7 @@ def to_grid(gps):
     return x * y_len + y
 
 
-VOCUB_SIZE = to_grid([116.5574, 40.1022]) + 96 # VOCUB_SIZE = 30720, 30720 / 1024 = 30
+VOCUB_SIZE = to_grid([116.5574, 40.1022]) + 96  # VOCUB_SIZE = 30720, 30720 / 1024 = 30
 SOT = to_grid([116.5574, 40.1022]) + 1
 
 
