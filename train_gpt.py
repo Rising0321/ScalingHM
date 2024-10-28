@@ -808,14 +808,16 @@ if __name__ == "__main__":
             model.eval()
             # before we end, let's also do one round of inference
             # we'll kick off the generation with "<|endoftext|>", which designates the start of a new sequence
-            start_ids = [enc.eot_token]
-            xg = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
-            max_new_tokens = 32
+            generate_batch_size = 16
+            start_ids = [enc.eot_token] * generate_batch_size
+            xg = (torch.tensor(start_ids, dtype=torch.long, device=device).view(generate_batch_size, 1))
+            max_new_tokens = 96 # 24 hours
             temperature = 1.0
             top_k = 40
             yg = raw_model.generate(xg, max_new_tokens, temperature=temperature, top_k=top_k)
             print0('---------------')
-            print0(enc.decode(yg[0].tolist()))
+            for i in range(generate_batch_size):
+                print0(f"Generated sequence {i + 1}:\n", enc.decode(yg[i].tolist()))
             print0('---------------')
 
         # bit confusing: we want to make sure to eval and sample on 0th iteration
