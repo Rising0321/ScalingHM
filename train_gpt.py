@@ -600,11 +600,12 @@ if __name__ == "__main__":
                         help="input .bin to eval validation loss on")
     parser.add_argument("--output_dir", type=str, default="",
                         help="output directory to which to write logs and checkpoints")
-    parser.add_argument("--model", type=str, default="d12", help="gpt2|gpt2-medium|gpt2-large|gpt2-xl|d12|d24|d36|d48")
+    parser.add_argument("--model", type=str, default="d12",
+                        help="gpt2|gpt2-medium|gpt2-large|gpt2-xl|d1|d10|d100|d300|d500|d1000")
     # token layout for each step of the optimization
-    parser.add_argument("--batch_size", type=int, default=2, help="batch size, in units of #batch dimensions")
+    parser.add_argument("--batch_size", type=int, default=4, help="batch size, in units of #batch dimensions")
     parser.add_argument("--sequence_length", type=int, default=1345, help="sequence length")
-    parser.add_argument("--total_batch_size", type=int, default=8 * 2 * 1345,
+    parser.add_argument("--total_batch_size", type=int, default=8 * 4 * 1345,
                         help="total desired batch size, in units of #tokens")
     # workload (number of steps)
     parser.add_argument("--num_iterations", type=int, default=250000, help="number of iterations to run")
@@ -638,7 +639,7 @@ if __name__ == "__main__":
     B, T = args.batch_size, args.sequence_length
     assert 1 <= T <= 4096
     assert args.dtype in {"float32", "float16", "bfloat16"}
-    assert args.model in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl", "d12", "d24", "d36", "d48"}
+    assert args.model in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl", "d1", "d10", "d100", "d300", "d500", "d1000"}
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
     ddp = int(os.environ.get('RANK', -1)) != -1  # is this a ddp run?
@@ -700,15 +701,17 @@ if __name__ == "__main__":
     # turn on/off flash attention
     assert args.flash in {0, 1}
     FLASH = args.flash
-
+    os.environ
     # init the model, either from scratch or from OpenAI pretrained checkpoint
     if args.model[0] == "d":
         # from scratch (random weights)
         model_config = {
-            "d12": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=12, n_head=12, n_embd=768),
-            "d24": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=24, n_head=16, n_embd=1024),
-            "d36": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=36, n_head=20, n_embd=1280),
-            "d48": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=48, n_head=25, n_embd=1600),
+            "d1": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=6, n_head=4, n_embd=128),
+            "d10": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=6, n_head=8, n_embd=512),
+            "d100": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=12, n_head=12, n_embd=768),
+            "d300": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=24, n_head=16, n_embd=1024),
+            "d500": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=24, n_head=24, n_embd=1280),
+            "d1000": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=36, n_head=24, n_embd=1536)
         }[args.model]
         model = GPT(model_config)
     else:
