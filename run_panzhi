@@ -1,7 +1,0 @@
-torchrun --standalone --nproc_per_node=8 train_gpt.py  --write_tensors=0 \
-                                                       --tensorcores=1 \
-                                                       --dtype=bfloat16 \
-                                                       --zero_stage=1 \
-                                                       --compile=0 \
-                                                       --model=d1 \
-                                                       --output_dir ./logs/10281948-

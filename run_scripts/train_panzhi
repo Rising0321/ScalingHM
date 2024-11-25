@@ -1,0 +1,41 @@
+torchrun --standalone --nproc_per_node=8 train_gpt.py  --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d1 \
+                                                       --output_dir ./logs/d1-1120
+
+torchrun --standalone --nproc_per_node=8 train_gpt.py  --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d10 \
+                                                       --output_dir ./logs/d10-1120
+
+torchrun --standalone --nproc_per_node=8 train_gpt.py  --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d100 \
+                                                       --output_dir ./logs/d100-1120
+
+torchrun --standalone --nproc_per_node=8 train_gpt.py  --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d300 \
+                                                       --output_dir ./logs/d300-1120
+
+torchrun --standalone --nproc_per_node=8 train_gpt.py  --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d500 \
+                                                       --output_dir ./logs/d500-1120
+
+torchrun --standalone --nproc_per_node=8 train_gpt.py  --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d1000 \
+                                                       --output_dir ./logs/d1000-1120

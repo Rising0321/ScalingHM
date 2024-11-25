@@ -1,3 +1,22 @@
+"""
+Reference code for GPT-2 training and inference.
+Will save the model weights into files, to be read from C as initialization.
+
+References:
+1) the official GPT-2 TensorFlow implementation released by OpenAI:
+https://github.com/openai/gpt-2/blob/master/src/model.py
+2) huggingface/transformers PyTorch implementation:
+https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
+
+Example launches to only benchmark the speed of bfloat16 compiled GPU training:
+1 GPU:
+python train_gpt2.py --write_tensors=0 --num_iterations=50 --sequence_length=1024 --compile=1 --tensorcores=1 --dtype=bfloat16
+you can also turn on flash-attention by appending --flash=1
+4 GPU:
+torchrun --standalone --nproc_per_node=4 train_gpt.py --write_tensors=0  --sequence_length=961 --compile=0 --tensorcores=1 --dtype=bfloat16
+
+"""
+
 import os
 import math
 import glob
@@ -17,9 +36,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from torch.distributed.optim import ZeroRedundancyOptimizer
 import torch.distributed as dist
-from model.GPT import GPT
+
 import time
-from utils.utils import print0, decode, init_seed
+from model.GPT import GPT
+from utils.utils import print0, decode
 from data.data import DistributedDataLoader
 
 # using a global to toggle flash-attention
@@ -38,6 +58,14 @@ class GPTConfig:
     n_embd: int = 768
 
 
+# -----------------------------------------------------------------------------
+# Our own simple Distributed Data Loader
+
+def _peek_data_shard(filename):
+    traj_data = np.load(filename)
+    return traj_data.shape[0] * traj_data.shape[1]  # for now just return the number of tokens
+
+
 def to_grid(gps):
     x_range = [116.2075, 116.5575]
     y_range = [39.7523, 40.1023]
@@ -51,6 +79,23 @@ def to_grid(gps):
     return x * y_len + y
 
 
+def xy_to_grid(x, y):
+    y_range = [39.7523, 40.1023]
+    grid_len = 0.002  # 200m x 200m
+    y_len = int((y_range[1] - y_range[0]) / grid_len)
+    return x * y_len + y
+
+
+def decode_xy(grid):
+    x_range = [116.2075, 116.5575]
+    y_range = [39.7523, 40.1023]
+    grid_len = 0.002  # 200m x 200m
+    y_len = int((y_range[1] - y_range[0]) / grid_len)
+    x = grid // y_len
+    y = grid % y_len
+    return int(x), int(y)
+
+
 VOCUB_SIZE = to_grid([116.5574, 40.1022]) + 96  # VOCUB_SIZE = 30720, 30720 / 1024 = 30
 SOT = to_grid([116.5574, 40.1022]) + 1
 
@@ -58,7 +103,6 @@ tot_time = 0
 
 
 def process_input(idx, targets, start_day):
-    # print(idx.shape)
     idx_ = idx[:, start_day * 96 + 1: (start_day + 8) * 96]
     idx = torch.concat([idx[:, 0:1], idx_], dim=1)
     targets = targets[:, start_day * 96: (start_day + 8) * 96]
@@ -68,7 +112,6 @@ def process_input(idx, targets, start_day):
 if __name__ == "__main__":
     import time
     import argparse
-    import tiktoken
 
     print0(f"Running pytorch {torch.version.__version__}")
 
@@ -76,14 +119,14 @@ if __name__ == "__main__":
     # and save model weights and debug state to disk on the first iteration
     parser = argparse.ArgumentParser()
     # file system input / output
-    parser.add_argument("--input_bin", type=str, default="/workdir/all_data/train/**/**_data.npy",
+    parser.add_argument("--input_bin", type=str, default="/workdir/data/train/**/**_data.npy",
                         help="input .bin to train on")
-    parser.add_argument("--input_val_bin", type=str, default="/workdir/all_data/eval/**/**_data.npy",
+    parser.add_argument("--input_val_bin", type=str, default="/workdir/data/train/**/**_data.npy",
                         help="input .bin to eval validation loss on")
     parser.add_argument("--output_dir", type=str, default="",
                         help="output directory to which to write logs and checkpoints")
     parser.add_argument("--model", type=str, default="d12",
-                        help="gpt2|gpt2-medium|gpt2-large|gpt2-xl|d1|d10|d100|d300|d500|d1000|d1500")
+                        help="gpt2|gpt2-medium|gpt2-large|gpt2-xl|d1|d10|d100|d300|d500|d1000")
     # token layout for each step of the optimization
     parser.add_argument("--batch_size", type=int, default=4, help="batch size, in units of #batch dimensions")
     parser.add_argument("--sequence_length", type=int, default=1345, help="sequence length")
@@ -118,14 +161,13 @@ if __name__ == "__main__":
     parser.add_argument("--load_model", type=int, default=0, help="load the model from disk")
     # gen config
     parser.add_argument("--gen_batch_size", type=int, default=16, help="generate batch size")
-    parser.add_argument("--seed", type=int, default=42, help="gen seed")
     args = parser.parse_args()
 
     # args error checking and convenience variables
     B, T = args.batch_size, args.sequence_length
     assert 1 <= T <= 4096
     assert args.dtype in {"float32", "float16", "bfloat16"}
-    assert args.model in {"d1", "d10", "d100", "d300", "d500", "d1000", "d1500"}
+    assert args.model in {"d1", "d10", "d100", "d300", "d500", "d1000"}
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
     ddp = int(os.environ.get('RANK', -1)) != -1  # is this a ddp run?
@@ -175,8 +217,9 @@ if __name__ == "__main__":
     ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype) if device_type == "cuda" else nullcontext()
 
     # rng / reproducibility
-
-    init_seed(args.seed)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
 
     # set the torch precision mode to use TensorFloat32 (TF32) for matmuls
     # docs https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
@@ -196,8 +239,7 @@ if __name__ == "__main__":
             "d100": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=12, n_head=12, n_embd=768),
             "d300": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=24, n_head=16, n_embd=1024),
             "d500": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=24, n_head=16, n_embd=1280),
-            "d1000": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=36, n_head=24, n_embd=1536),
-            "d1500": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=48, n_head=24, n_embd=1608)
+            "d1000": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=36, n_head=24, n_embd=1536)
         }[args.model]
         model = GPT(model_config)
     else:
@@ -233,186 +275,44 @@ if __name__ == "__main__":
                                                learning_rate=args.learning_rate, betas=(0.9, 0.95),
                                                device_type=device, zero_stage=zero_stage)
 
-
-    # learning rate decay scheduler (cosine with warmup)
-    def get_lr(it):
-        min_lr = args.learning_rate * args.learning_rate_decay_frac
-        # 1) linear warmup for warmup_iters steps
-        if it < args.warmup_iters:
-            return args.learning_rate * (it + 1) / args.warmup_iters
-        # 2) if it > lr_decay_iters, return min learning rate
-        if it > args.num_iterations:
-            return min_lr
-        # 3) in between, use cosine decay down to min learning rate
-        decay_ratio = (it - args.warmup_iters) / (args.num_iterations - args.warmup_iters)
-        assert 0 <= decay_ratio <= 1
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff starts at 1 and goes to 0
-        return min_lr + coeff * (args.learning_rate - min_lr)
-
-
-    # create the logging directory if it does not exist
     logfile = None
     if args.output_dir:
-        os.makedirs(args.output_dir, exist_ok=True)
-        logfile = os.path.join(args.output_dir, "main.log")
         modelfile = os.path.join(args.output_dir, "model.bin")
-        if args.test_write_model:
-            print0("writing model to disk to test serialization")
-            torch.save(raw_model.state_dict(), modelfile)
-            model_config = {
-                "d1": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=6, n_head=4, n_embd=128),
-                "d10": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=6, n_head=8, n_embd=512),
-                "d100": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=12, n_head=12, n_embd=768),
-                "d300": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=24, n_head=16, n_embd=1024),
-                "d500": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=24, n_head=16, n_embd=1280),
-                "d1000": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=36, n_head=24, n_embd=1536),
-                "d1500": GPTConfig(block_size=1024, vocab_size=VOCUB_SIZE, n_layer=48, n_head=24, n_embd=1608)
-            }[args.model]
-            model2 = GPT(model_config)
-            model2 = model2.to(device)
-            model2 = DDP(model2, device_ids=[ddp_local_rank])
-            model2.module.load_state_dict(torch.load(modelfile))
-            print(model.module.transformer.wte.weight)
-            print(model2.module.transformer.wte.weight)
-            exit(0)
+        model.module.load_state_dict(torch.load(modelfile))
+    else:
+        raise NotImplementedError
 
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    timings = []
-    norm = -1.0  # dummy value to print in inference-only mode
-    val_time, loading_time, inference_time = 0.0, 0.0, 0.0
-    best_val = 100000
+
+    cnt_sample = 0
+    acc_sample = 0
+    from tqdm import tqdm
+
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+
+    sum_prob = 0
+    cnt = 0
+
     for step in range(args.num_iterations + 1):
-        t0 = time.time()
-        last_step = (step == args.num_iterations)
-
-        # once in a while evaluate the validation dataset
-        if (args.val_loss_every > 0 \
-            and (step % args.val_loss_every == 0 or last_step)) \
-                and (val_loader is not None):
-            model.eval()
-            val_loader.reset()
-            with torch.no_grad():
-                val_loss = 0.0
-                for _ in range(args.val_max_steps):
-                    loading_time_st = time.time()
-                    x, y = val_loader.next_batch()
-                    loading_time += time.time() - loading_time_st
-                    inference_time_st = time.time()
-                    x, y = x.to(device), y.to(device)
-                    start_day = random.randint(0, 6)
-                    x, y = process_input(x, y, start_day)
-                    _, loss = model(x, y, start_day=start_day, return_logits=False)
-                    val_loss += loss.item()
-                    inference_time += time.time() - inference_time_st
-                val_loss /= args.val_max_steps
-            # log to console and to file
-            print0(f"val loss {val_loss}")
-            if master_process and logfile is not None:
-                with open(logfile, "a") as f:
-                    f.write("s:%d tel:%f\n" % (step, val_loss))
-                if val_loss < best_val:
-                    best_val = val_loss
-                    torch.save(raw_model.state_dict(), modelfile)
-
-        # once in a while perform model inference on the master process
-        if (args.sample_every > 0 \
-            and (step % args.sample_every == 0 or last_step)) \
-                and master_process:
-            model.eval()
-            # before we end, let's also do one round of inference
-            # we'll kick off the generation with "<|endoftext|>", which designates the start of a new sequence
-            generate_batch_size = args.gen_batch_size
-            start_ids = [SOT] * generate_batch_size
-            xg = (torch.tensor(start_ids, dtype=torch.long, device=device).view(generate_batch_size, 1))
-            max_new_tokens = 96  # 24 hours
-            temperature = 1.0
-            top_k = 40
-            yg = raw_model.generate(xg, max_new_tokens, temperature=temperature, top_k=top_k)
-            print0('---------------')
-            for i in range(generate_batch_size):
-                print0(f"Generated sequence {i + 1}:\n", decode(yg[i].tolist()))
-            print0('---------------')
-
-        # bit confusing: we want to make sure to eval and sample on 0th iteration
-        # but also after the very last iteration. so we loop for step <= num_iterations
-        # instead of just < num_iterations (one extra due to <=), only to do
-        # the validation/sampling one last time, and then we break right here as we're done.
-        if last_step:
-            break
-
-        # --------------- TRAINING SECTION BEGIN -----------------
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
-        # if we are trying to overfit a single batch, we reset the loader here
-        if args.overfit_single_batch:
-            train_loader.reset()
-        # micro-batch loop where we do gradient accumulation to reach desired total batch size
-        lossf = 0.0  # for getting the mean loss (as simple float) over the accumulation steps
-        for micro_step in range(grad_accum_steps):
-            # fetch a batch
-            loading_time_st = time.time()
+        model.eval()
+        with torch.no_grad():
             x, y = train_loader.next_batch()
-            loading_time += time.time() - loading_time_st
-            inference_time_st = time.time()
             x, y = x.to(device), y.to(device)
-            if ddp:
-                # we want only the last micro-step to sync grads in a DDP model
-                # the official way to do this is with model.no_sync(), but that is a
-                # context manager that bloats the code, so we just toggle this variable
-                model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
-            # forward pass
-            with ctx:
-                start_day = random.randint(0, 6)
-                x, y = process_input(x, y, start_day)
-                _, loss = model(x, y, start_day=start_day, return_logits=False)
-                # we have to scale the loss to account for gradient accumulation,
-                # because the gradients just add on each successive backward().
-                # addition of gradients corresponds to a SUM in the objective, but
-                # instead of a SUM we want MEAN, so we scale the loss here
-                loss = loss / grad_accum_steps
-                lossf += loss.detach()  # keep track of the mean loss
-            # backward pass
-            if not args.inference_only:
-                loss.backward()
-            inference_time += time.time() - inference_time_st
-        if ddp:
-            dist.all_reduce(lossf, op=dist.ReduceOp.AVG)
-        lossf = lossf.item()
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        # determine and set the learning rate for this iteration
-        lr = get_lr(step)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-        # step the optimizer
-        optimizer.step()
-        # --------------- TRAINING SECTION END -------------------
-        # everything that follows now is just diagnostics, prints, logging, etc.
-
-        # wait on the CPU for all device work to end so we get accurate per-iteration timings below
-        if device == "mps":
-            torch.mps.synchronize()
-        elif device == "cuda":
-            torch.cuda.synchronize()
-        # time and print
-        t1 = time.time()
-        # the 0th iteration is often an outlier (much slower) => skip logging it
-        tokens_per_second = grad_accum_steps * ddp_world_size * B * T / (t1 - t0)
-        print0(
-            f"step {step + 1:4d}/{args.num_iterations} | tot_time {tot_time} | load_time {loading_time} | train_time {inference_time} | train loss {lossf:.6f} | norm {norm:.4f} | lr {lr:.2e} | ({(t1 - t0) * 1000:.2f} ms | {tokens_per_second:.0f} tok/s)")
-        # log to logile
-        if master_process and logfile is not None:
-            with open(logfile, "a") as f:
-                f.write("s:%d trl:%f\n" % (step, lossf))
-
-        # keep track of smooth timings, last 20 iterations
-        if step > 0 and step > args.num_iterations - 20:
-            timings.append(t1 - t0)
-
-    # print the average of the last 20 timings, to get something smooth-ish
-    timings = timings[-20:]
-    print0(f"final {len(timings)} iters avg: {np.mean(timings) * 1000:.3f}ms")
-    print0(f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
+            start_day = random.randint(0, 6)
+            x, y = process_input(x, y, start_day)
+            logits, loss = model(x, y, start_day=start_day)
+            probs = F.softmax(logits, dim=-1)
+            probs = probs.to("cpu").numpy()
+            for i in range(x.shape[0]):
+                now_prob = 0
+                for j in range(x.shape[1]):
+                    now_prob += np.log(probs[i][j][y[i][j]])
+                sum_prob += now_prob
+                cnt += 1
+            if step % 100 == 0:
+                print(sum_prob / cnt)
 
     # -------------------------------------------------------------------------
     # clean up nice

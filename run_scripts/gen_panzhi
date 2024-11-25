@@ -1,0 +1,35 @@
+# gen
+torchrun --standalone --nproc_per_node=8 test_gen.py   --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d100 \
+                                                       --output_dir ./logs/d100-11081959
+
+# gen_cond
+CUDA_VISIABLE_DEVICES=1,2 torchrun --standalone --nproc_per_node=2 test_cond_gen.py   --tensorcores=1 \
+                                                            --dtype=bfloat16 \
+                                                            --zero_stage=1 \
+                                                            --compile=0 \
+                                                            --model=d100 \
+                                                            --output_dir ./logs/d100-1120
+
+# acc
+
+torchrun --standalone --nproc_per_node=8 test_acc.py   --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d500 \
+                                                       --output_dir ./logs/d500-11081959
+
+
+# pri
+
+torchrun --standalone --nproc_per_node=8 test_pri.py   --tensorcores=1 \
+                                                       --dtype=bfloat16 \
+                                                       --zero_stage=1 \
+                                                       --compile=0 \
+                                                       --model=d100 \
+                                                       --output_dir ./logs/d100-11081959
+
